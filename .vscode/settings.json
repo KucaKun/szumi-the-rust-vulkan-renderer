@@ -1,0 +1,15 @@
+{
+    "editor.formatOnSave": true,
+    "rust-analyzer.hover.actions.debug.enable": false,
+    "rust-analyzer.hover.actions.gotoTypeDef.enable": false,
+    "rust-analyzer.hover.actions.implementations.enable": false,
+    "rust-analyzer.hover.actions.run.enable": false,
+    "rust-analyzer.lens.enable": false,
+    "rust-analyzer.signatureInfo.detail": "full",
+    "rust-analyzer.inlayHints.typeHints.hideClosureInitialization": false,
+    "rust-analyzer.inlayHints.chainingHints.enable": false,
+    "rust-analyzer.inlayHints.closingBraceHints.enable": false,
+    "rust-analyzer.inlayHints.parameterHints.enable": false,
+    "rust-analyzer.inlayHints.renderColons": false,
+    "rust-analyzer.inlayHints.typeHints.enable": false
+}
