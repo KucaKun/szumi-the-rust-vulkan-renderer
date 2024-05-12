@@ -7,7 +7,7 @@ edition = "2021"
 vulkano = "0.34.0"
 vulkano-shaders = "0.34.0"
 image = "0.24"
-
+color-eyre = "0.6.2"
 
 
 [profile.dev]
