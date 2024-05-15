@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-vulkano = "0.34.0"
+vulkano = "0.34.1"
 vulkano-shaders = "0.34.0"
 image = "0.24"
 color-eyre = "0.6.2"
 winit = {version = "0.30.0", features = ["rwh_05"]}
 
 [profile.dev]
-opt-level = 1 
+opt-level = 0

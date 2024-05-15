@@ -15,17 +15,23 @@ use vulkano::command_buffer::RenderPassBeginInfo;
 use vulkano::command_buffer::SubpassBeginInfo;
 use vulkano::command_buffer::SubpassContents;
 use vulkano::command_buffer::SubpassEndInfo;
+use vulkano::device::physical;
 use vulkano::device::physical::PhysicalDevice;
 use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::device::Device;
 use vulkano::device::DeviceExtensions;
 use vulkano::device::Queue;
 use vulkano::device::QueueFlags;
+use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::image::Image;
+use vulkano::image::ImageCreateInfo;
+use vulkano::image::ImageType;
+use vulkano::image::ImageUsage;
 use vulkano::instance::Instance;
 use vulkano::memory::allocator::AllocationCreateInfo;
 use vulkano::memory::allocator::MemoryTypeFilter;
+use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::graphics::color_blend::ColorBlendAttachmentState;
 use vulkano::pipeline::graphics::color_blend::ColorBlendState;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
@@ -46,7 +52,9 @@ use vulkano::render_pass::RenderPass;
 use vulkano::render_pass::Subpass;
 use vulkano::shader::ShaderModule;
 use vulkano::swapchain::Surface;
+use vulkano::swapchain::SurfaceCapabilities;
 use vulkano::swapchain::Swapchain;
+use vulkano::swapchain::SwapchainCreateInfo;
 
 #[derive(BufferContents, Vertex)]
 #[repr(C)]
@@ -91,7 +99,7 @@ pub(crate) fn select_physical_device(
         .expect("no device available")
 }
 
-pub(crate) fn get_render_pass(device: Arc<Device>, swapchain: &Arc<Swapchain>) -> Arc<RenderPass> {
+pub(crate) fn get_render_pass(device: Arc<Device>, swapchain: Arc<Swapchain>) -> Arc<RenderPass> {
     vulkano::single_pass_renderpass!(
         device,
         attachments: {
@@ -267,4 +275,61 @@ pub(crate) fn get_triangle_vertex_buffer(
     )
     .unwrap();
     vertex_buffer
+}
+
+pub(crate) fn create_image_view(
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    dimensions: [u32; 3],
+) -> Arc<ImageView> {
+    let image = Image::new(
+        memory_allocator.clone(),
+        ImageCreateInfo {
+            image_type: ImageType::Dim2d,
+            format: Format::R8G8B8A8_UNORM,
+            extent: dimensions,
+            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    ImageView::new_default(image.clone()).unwrap()
+}
+
+pub(crate) fn create_swapchain(
+    physical_device: Arc<PhysicalDevice>,
+    device: Arc<Device>,
+    surface: Arc<Surface>,
+    surface_caps: SurfaceCapabilities,
+    dimensions: [u32; 2],
+) -> (Arc<Swapchain>, Vec<Arc<Image>>) {
+    let composite_alpha = surface_caps
+        .supported_composite_alpha
+        .into_iter()
+        .next()
+        .unwrap();
+
+    let image_format = physical_device
+        .surface_formats(&surface, Default::default())
+        .unwrap()[0]
+        .0;
+
+    let (swapchain, images) = Swapchain::new(
+        device.clone(),
+        surface.clone(),
+        SwapchainCreateInfo {
+            min_image_count: surface_caps.min_image_count + 1, // How many buffers to use in the swapchain
+            image_format,
+            image_extent: dimensions,
+            image_usage: ImageUsage::COLOR_ATTACHMENT, // What the images are going to be used for
+            composite_alpha,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    return (swapchain, images);
 }
