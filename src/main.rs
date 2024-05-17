@@ -1,33 +1,36 @@
-use std::future;
 use std::sync::Arc;
 
 use prepare::MyVertex;
 use vulkano::buffer::Subbuffer;
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
-use vulkano::command_buffer::{CommandBufferExecFuture, PrimaryAutoCommandBuffer};
+use vulkano::command_buffer::PrimaryAutoCommandBuffer;
 use vulkano::device::physical::PhysicalDevice;
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
+use vulkano::format::Format;
 use vulkano::image::view::ImageView;
-use vulkano::image::Image;
+use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::instance::{Instance, InstanceCreateInfo};
-use vulkano::memory::allocator::StandardMemoryAllocator;
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::render_pass::{Framebuffer, RenderPass};
+use vulkano::render_pass::{self, Framebuffer, RenderPass};
 use vulkano::swapchain::{
-    self, PresentFuture, Surface, SurfaceCapabilities, Swapchain, SwapchainAcquireFuture,
-    SwapchainCreateInfo, SwapchainPresentInfo,
+    self, Surface, SurfaceCapabilities, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
 };
-use vulkano::sync::future::{FenceSignalFuture, JoinFuture, NowFuture};
 use vulkano::sync::GpuFuture;
 use vulkano::{sync, Validated, VulkanError, VulkanLibrary};
 use winit::application::ApplicationHandler;
-use winit::event::{Event, WindowEvent};
+use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::Window;
 use winit::window::WindowId;
 
 mod prepare;
 
+#[derive(Default)]
+struct App {
+    window: Option<Arc<Window>>,
+    renderer: Option<Renderer>,
+}
 /// This struct does not change during the lifetime of the application
 struct VulkanConnection {
     device: Arc<Device>,
@@ -85,13 +88,13 @@ impl VulkanConnection {
         }
     }
 }
-
 // Core is the struct that holds objects that depend on window size. They need to be remade each time a window is resized.
 struct RendererCore {
     vapi: Arc<VulkanConnection>,
     images: Vec<Arc<Image>>,
     viewport: Viewport,
     render_pass: Arc<RenderPass>,
+    view: Arc<ImageView>,
     memory_allocator: Arc<StandardMemoryAllocator>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     framebuffers: Vec<Arc<Framebuffer>>,
@@ -115,6 +118,8 @@ impl RendererCore {
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(vapi.device.clone()));
 
         let framebuffers = prepare::get_framebuffers(&images, &render_pass);
+
+        let view = prepare::create_image_view(memory_allocator.clone(), [1024, 1024, 1]);
 
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
             vapi.device.clone(),
@@ -156,6 +161,7 @@ impl RendererCore {
             command_buffers,
             render_pass,
             swapchain,
+            view,
             memory_allocator,
             command_buffer_allocator,
             vertex_buffer,
@@ -192,7 +198,6 @@ impl RendererCore {
         );
     }
 }
-
 struct Renderer {
     vapi: Arc<VulkanConnection>,
     core: RendererCore,
@@ -225,6 +230,7 @@ impl Renderer {
             return;
         }
 
+        // Execute the command buffer
         let execution = sync::now(self.vapi.device.clone())
             .join(acquire_future)
             .then_execute(
@@ -237,55 +243,62 @@ impl Renderer {
                 SwapchainPresentInfo::swapchain_image_index(self.core.swapchain.clone(), image_i),
             )
             .then_signal_fence_and_flush();
+
+        match execution.map_err(Validated::unwrap) {
+            Ok(future) => {
+                // Wait for the GPU to finish.
+                future.wait(None).unwrap();
+            }
+            Err(e) => {
+                println!("failed to flush future: {e}");
+            }
+        }
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let window_attributes = Window::default_attributes()
+            .with_title("Vulkan Triangle")
+            .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 1024.0));
+        self.window = Some(Arc::new(
+            event_loop.create_window(window_attributes).unwrap(),
+        ));
+        self.renderer = Some(Renderer::new(
+            self.window
+                .as_ref()
+                .expect("Window should be set before renderer")
+                .clone(),
+        ));
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        assert!(self.window.is_some());
+        assert!(self.renderer.is_some());
+        let window = self.window.as_ref().unwrap();
+        let renderer = self.renderer.as_mut().unwrap();
+        //MARK: - Event loop
+        match event {
+            WindowEvent::CloseRequested => {
+                println!("The close button was pressed; stopping");
+                event_loop.exit();
+            }
+            WindowEvent::Resized(new_size) => {
+                println!("The window was resized to {:?}", new_size);
+                renderer.recreate_core(window.clone());
+            }
+            WindowEvent::RedrawRequested => {
+                renderer.on_draw(window.clone());
+                window.request_redraw();
+            }
+            _ => (),
+        }
     }
 }
 
 fn main() {
+    let mut app: App = App::default();
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
-
-    let mut window = None;
-    let mut renderer = None;
-
-    #[allow(deprecated)]
-    event_loop
-        .run(|event, event_loop| match event {
-            Event::Resumed => {
-                let window_attributes = Window::default_attributes()
-                    .with_title("Vulkan Triangle")
-                    .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 1024.0));
-                window = Some(Arc::new(
-                    event_loop.create_window(window_attributes).unwrap(),
-                ));
-                renderer = Some(Renderer::new(
-                    window
-                        .as_ref()
-                        .expect("Window should be set before renderer")
-                        .clone(),
-                ));
-            }
-            Event::WindowEvent { window_id, event } => match event {
-                WindowEvent::CloseRequested => {
-                    println!("The close button was pressed; stopping");
-                    event_loop.exit();
-                }
-                WindowEvent::Resized(new_size) => {
-                    println!("The window was resized to {:?}", new_size);
-                    renderer
-                        .as_mut()
-                        .expect("Renderer should be set before window event")
-                        .recreate_core(window.clone().unwrap());
-                }
-                WindowEvent::RedrawRequested => {
-                    renderer
-                        .as_mut()
-                        .expect("Renderer should be set before window event")
-                        .on_draw(window.clone().unwrap());
-                    window.as_ref().unwrap().request_redraw();
-                }
-                _ => (),
-            },
-            _ => (),
-        })
-        .expect("Event loop failed");
+    event_loop.run_app(&mut app).expect("Error on running app");
 }
