@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use prepare::MyVertex;
+use vulkano::buffer::Subbuffer;
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::PrimaryAutoCommandBuffer;
 use vulkano::device::physical::PhysicalDevice;
@@ -86,10 +88,9 @@ impl VulkanConnection {
         }
     }
 }
-struct Renderer {
+// Core is the struct that holds objects that depend on window size. They need to be remade each time a window is resized.
+struct RendererCore {
     vapi: Arc<VulkanConnection>,
-    swapchain: Arc<Swapchain>,
-    command_buffers: Vec<Arc<PrimaryAutoCommandBuffer>>,
     images: Vec<Arc<Image>>,
     viewport: Viewport,
     render_pass: Arc<RenderPass>,
@@ -97,16 +98,19 @@ struct Renderer {
     memory_allocator: Arc<StandardMemoryAllocator>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     framebuffers: Vec<Arc<Framebuffer>>,
+    command_buffers: Vec<Arc<PrimaryAutoCommandBuffer>>,
+    swapchain: Arc<Swapchain>,
+    vertex_buffer: Arc<Subbuffer<[MyVertex]>>,
 }
-impl Renderer {
-    pub fn new(window: Arc<Window>) -> Self {
-        let vapi = Arc::new(VulkanConnection::new(window.clone()));
+
+impl RendererCore {
+    fn new(vapi: Arc<VulkanConnection>, dimensions: [u32; 2]) -> Self {
         let (swapchain, images) = prepare::create_swapchain(
             vapi.physical_device.clone(),
             vapi.device.clone(),
             vapi.surface.clone(),
             vapi.surface_caps.clone(),
-            window.inner_size().into(),
+            dimensions,
         );
 
         let render_pass = prepare::get_render_pass(vapi.device.clone(), swapchain.clone());
@@ -138,7 +142,9 @@ impl Renderer {
             viewport.clone(),
         );
 
-        let vertex_buffer = prepare::get_triangle_vertex_buffer(memory_allocator.clone());
+        let vertex_buffer = Arc::new(prepare::get_triangle_vertex_buffer(
+            memory_allocator.clone(),
+        ));
 
         let command_buffers = prepare::get_command_buffers(
             &command_buffer_allocator,
@@ -147,10 +153,9 @@ impl Renderer {
             &framebuffers,
             &vertex_buffer,
         );
-
         Self {
             vapi,
-            viewport: Viewport::default(),
+            viewport,
             images,
             framebuffers,
             command_buffers,
@@ -159,66 +164,83 @@ impl Renderer {
             view,
             memory_allocator,
             command_buffer_allocator,
+            vertex_buffer,
         }
     }
 
+    fn recreate(&mut self, dimensions: [u32; 2]) {
+        let (new_swapchain, new_images) = self
+            .swapchain
+            .recreate(SwapchainCreateInfo {
+                image_extent: dimensions,
+                ..self.swapchain.create_info()
+            })
+            .expect("failed to recreate swapchain: {e}");
+        self.swapchain = new_swapchain;
+        self.images = new_images;
+        self.framebuffers = prepare::get_framebuffers(&self.images, &self.render_pass);
+        self.viewport.extent = [dimensions[0] as f32, dimensions[1] as f32];
+        let (vs, fs) = prepare::get_shaders(self.vapi.device.clone());
+        let pipeline = prepare::get_pipeline(
+            self.vapi.device.clone(),
+            vs.clone(),
+            fs.clone(),
+            self.render_pass.clone(),
+            self.viewport.clone(),
+        );
+
+        self.command_buffers = prepare::get_command_buffers(
+            &self.command_buffer_allocator,
+            &self.vapi.queue,
+            &pipeline,
+            &self.framebuffers,
+            &self.vertex_buffer,
+        );
+    }
+}
+struct Renderer {
+    vapi: Arc<VulkanConnection>,
+    core: RendererCore,
+}
+impl Renderer {
+    pub fn new(window: Arc<Window>) -> Self {
+        let vapi = Arc::new(VulkanConnection::new(window.clone()));
+        let core = RendererCore::new(vapi.clone(), [1024, 1024]);
+        Self { vapi, core }
+    }
+
     /// This method recreates everything that depends on the window size
-    pub fn new_swapchain(&mut self, window: Arc<Window>) {
-        // let dimensions = window.inner_size();
-
-        // // Render Pass
-        // let render_pass =
-        //     prepare::get_render_pass(self.vapi.device.clone(), self.swapchain.clone());
-        // let image = Image::new(
-        //     self.memory_allocator.clone(),
-        //     ImageCreateInfo {
-        //         image_type: ImageType::Dim2d,
-        //         format: Format::R8G8B8A8_UNORM,
-        //         extent: [1024, 1024, 1],
-        //         usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
-        //         ..Default::default()
-        //     },
-        //     AllocationCreateInfo {
-        //         memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-        //         ..Default::default()
-        //     },
-        // )
-        // .unwrap();
-
-        // self.view = ImageView::new_default(image.clone()).unwrap();
-
-        // let vertex_buffer = prepare::get_triangle_vertex_buffer(self.memory_allocator.clone());
-
-        // self.command_buffers = prepare::get_command_buffers(
-        //     &self.command_buffer_allocator,
-        //     &self.vapi.queue,
-        //     &self.pipeline,
-        //     &framebuffers,
-        //     &vertex_buffer,
-        // );
+    pub fn recreate_core(&mut self, window: Arc<Window>) {
+        let dimensions = window.inner_size().into();
+        self.core.recreate(dimensions);
     }
 
     pub fn on_draw(&mut self, window: Arc<Window>) {
         // Acquire the next image to render to
         let (image_i, _suboptimal, acquire_future) =
-            match swapchain::acquire_next_image(self.swapchain.clone(), None)
+            match swapchain::acquire_next_image(self.core.swapchain.clone(), None)
                 .map_err(Validated::unwrap)
             {
                 Ok(r) => r,
                 Err(e) => panic!("failed to acquire next image: {e}"),
             };
 
+        if _suboptimal {
+            self.recreate_core(window.clone());
+            return;
+        }
+
         // Execute the command buffer
         let execution = sync::now(self.vapi.device.clone())
             .join(acquire_future)
             .then_execute(
                 self.vapi.queue.clone(),
-                self.command_buffers[image_i as usize].clone(),
+                self.core.command_buffers[image_i as usize].clone(),
             )
             .unwrap()
             .then_swapchain_present(
                 self.vapi.queue.clone(),
-                SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), image_i),
+                SwapchainPresentInfo::swapchain_image_index(self.core.swapchain.clone(), image_i),
             )
             .then_signal_fence_and_flush();
 
@@ -236,10 +258,11 @@ impl Renderer {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let window_attributes = Window::default_attributes()
+            .with_title("Vulkan Triangle")
+            .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 1024.0));
         self.window = Some(Arc::new(
-            event_loop
-                .create_window(Window::default_attributes())
-                .unwrap(),
+            event_loop.create_window(window_attributes).unwrap(),
         ));
         self.renderer = Some(Renderer::new(
             self.window
@@ -262,7 +285,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(new_size) => {
                 println!("The window was resized to {:?}", new_size);
-                renderer.new_swapchain(window.clone());
+                renderer.recreate_core(window.clone());
             }
             WindowEvent::RedrawRequested => {
                 renderer.on_draw(window.clone());
