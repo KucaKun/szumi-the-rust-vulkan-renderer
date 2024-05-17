@@ -201,12 +201,17 @@ impl RendererCore {
 struct Renderer {
     vapi: Arc<VulkanConnection>,
     core: RendererCore,
+    last_frame_future: Option<Box<dyn GpuFuture>>,
 }
 impl Renderer {
     pub fn new(window: Arc<Window>) -> Self {
         let vapi = Arc::new(VulkanConnection::new(window.clone()));
         let core = RendererCore::new(vapi.clone(), [1024, 1024]);
-        Self { vapi, core }
+        Self {
+            vapi,
+            core,
+            last_frame_future: None,
+        }
     }
 
     /// This method recreates everything that depends on the window size
@@ -246,8 +251,11 @@ impl Renderer {
 
         match execution.map_err(Validated::unwrap) {
             Ok(future) => {
-                // Wait for the GPU to finish.
-                future.wait(None).unwrap();
+                // Two frames in flight
+                if self.last_frame_future.is_some() {
+                    self.last_frame_future.as_mut().unwrap().cleanup_finished();
+                }
+                self.last_frame_future = Some(Box::new(future));
             }
             Err(e) => {
                 println!("failed to flush future: {e}");
