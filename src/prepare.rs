@@ -1,7 +1,12 @@
 mod shaders;
 
+use std::ops::Deref;
 use std::sync::Arc;
 
+use nalgebra::Matrix4;
+use nalgebra::Orthographic3;
+use vulkano::buffer::allocator::SubbufferAllocator;
+use vulkano::buffer::allocator::SubbufferAllocatorCreateInfo;
 use vulkano::buffer::Buffer;
 use vulkano::buffer::BufferContents;
 use vulkano::buffer::BufferCreateInfo;
@@ -15,6 +20,9 @@ use vulkano::command_buffer::RenderPassBeginInfo;
 use vulkano::command_buffer::SubpassBeginInfo;
 use vulkano::command_buffer::SubpassContents;
 use vulkano::command_buffer::SubpassEndInfo;
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::PersistentDescriptorSet;
+use vulkano::descriptor_set::WriteDescriptorSet;
 use vulkano::device::physical;
 use vulkano::device::physical::PhysicalDevice;
 use vulkano::device::physical::PhysicalDeviceType;
@@ -39,11 +47,13 @@ use vulkano::pipeline::graphics::multisample::MultisampleState;
 use vulkano::pipeline::graphics::rasterization::RasterizationState;
 use vulkano::pipeline::graphics::vertex_input::Vertex;
 use vulkano::pipeline::graphics::vertex_input::VertexDefinition;
+use vulkano::pipeline::graphics::viewport;
 use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::pipeline::graphics::viewport::ViewportState;
 use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::GraphicsPipeline;
+use vulkano::pipeline::Pipeline;
 use vulkano::pipeline::PipelineLayout;
 use vulkano::pipeline::PipelineShaderStageCreateInfo;
 use vulkano::render_pass::Framebuffer;
@@ -59,8 +69,19 @@ use vulkano::swapchain::SwapchainCreateInfo;
 #[derive(BufferContents, Vertex)]
 #[repr(C)]
 pub(crate) struct MyVertex {
-    #[format(R32G32_SFLOAT)]
-    pub position: [f32; 2],
+    #[format(R32G32_SINT)]
+    pub position: [i32; 2],
+
+    #[format(R8G8B8_UINT)]
+    pub color: [u8; 3],
+}
+
+#[derive(BufferContents)]
+#[repr(C)]
+pub(crate) struct MVP {
+    pub model: [[f32; 4]; 4],
+    pub view: [[f32; 4]; 4],
+    pub proj: [[f32; 4]; 4],
 }
 
 pub(crate) fn select_physical_device(
@@ -199,12 +220,32 @@ pub(crate) fn get_pipeline(
     .unwrap()
 }
 
+pub(crate) fn get_mvp_descriptor_set(
+    device: Arc<Device>,
+    pipeline: Arc<GraphicsPipeline>,
+    buffer: Arc<Subbuffer<MVP>>,
+) -> Arc<PersistentDescriptorSet> {
+    let descriptor_set_layout = pipeline.layout().set_layouts().get(0).unwrap().clone();
+    let descriptor_set_allocator =
+        StandardDescriptorSetAllocator::new(device.clone(), Default::default());
+    let descriptor_writes = [WriteDescriptorSet::buffer(0, buffer.deref().clone())];
+    let descriptor_set = PersistentDescriptorSet::new(
+        &descriptor_set_allocator,
+        descriptor_set_layout,
+        descriptor_writes,
+        [],
+    )
+    .unwrap();
+    descriptor_set
+}
+
 pub(crate) fn get_command_buffers(
     command_buffer_allocator: &StandardCommandBufferAllocator,
     queue: &Arc<Queue>,
     pipeline: &Arc<GraphicsPipeline>,
     framebuffers: &Vec<Arc<Framebuffer>>,
     vertex_buffer: &Subbuffer<[MyVertex]>,
+    descriptor_sets: Vec<Arc<PersistentDescriptorSet>>,
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
     framebuffers
         .iter()
@@ -231,6 +272,13 @@ pub(crate) fn get_command_buffers(
                 .unwrap()
                 .bind_pipeline_graphics(pipeline.clone())
                 .unwrap()
+                .bind_descriptor_sets(
+                    pipeline.bind_point(),
+                    pipeline.layout().clone(),
+                    0,
+                    descriptor_sets.clone(),
+                )
+                .unwrap()
                 .bind_vertex_buffers(0, vertex_buffer.clone())
                 .unwrap()
                 .draw(vertex_buffer.len() as u32, 1, 0, 0)
@@ -251,13 +299,16 @@ pub(crate) fn get_triangle_vertex_buffer(
     >,
 ) -> vulkano::buffer::Subbuffer<[MyVertex]> {
     let vertex1 = MyVertex {
-        position: [-0.5, -0.5],
+        position: [100, 100],
+        color: [255, 0, 0],
     };
     let vertex2 = MyVertex {
-        position: [0.0, 0.5],
+        position: [0, 100],
+        color: [0, 255, 0],
     };
     let vertex3 = MyVertex {
-        position: [0.5, -0.25],
+        position: [100, 25],
+        color: [0, 0, 255],
     };
 
     let vertex_buffer = Buffer::from_iter(
@@ -275,6 +326,41 @@ pub(crate) fn get_triangle_vertex_buffer(
     )
     .unwrap();
     vertex_buffer
+}
+
+pub(crate) fn get_mvp_buffer(
+    memory_allocator: Arc<
+        vulkano::memory::allocator::GenericMemoryAllocator<
+            vulkano::memory::allocator::FreeListAllocator,
+        >,
+    >,
+    viewport: Viewport,
+) -> Subbuffer<MVP> {
+    let model: Matrix4<f32> = Matrix4::identity();
+    let view: Matrix4<f32> = Matrix4::identity();
+    let projection =
+        Orthographic3::new(0.0, viewport.extent[1], 0.0, viewport.extent[1], -1.0, 1.0)
+            .to_homogeneous();
+    let mvp = MVP {
+        model: model.into(),
+        view: view.into(),
+        proj: projection.into(),
+    };
+    let uniform_buffer = Buffer::from_data(
+        memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::UNIFORM_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        mvp,
+    )
+    .unwrap();
+    uniform_buffer
 }
 
 pub(crate) fn create_image_view(

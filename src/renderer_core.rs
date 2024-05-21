@@ -71,13 +71,22 @@ impl RendererCore {
         let vertex_buffer = Arc::new(prepare::get_triangle_vertex_buffer(
             memory_allocator.clone(),
         ));
-
+        let mvp_buffer = Arc::new(prepare::get_mvp_buffer(
+            memory_allocator.clone(),
+            viewport.clone(),
+        ));
+        let mvp_set = prepare::get_mvp_descriptor_set(
+            vapi.device.clone(),
+            pipeline.clone(),
+            mvp_buffer.clone(),
+        );
         let command_buffers = prepare::get_command_buffers(
             &command_buffer_allocator,
             &vapi.queue,
             &pipeline,
             &framebuffers,
             &vertex_buffer,
+            vec![mvp_set],
         );
         Self {
             vapi,
@@ -114,13 +123,22 @@ impl RendererCore {
             self.render_pass.clone(),
             self.viewport.clone(),
         );
-
+        let mvp_buffer = Arc::new(prepare::get_mvp_buffer(
+            self.memory_allocator.clone(),
+            self.viewport.clone(),
+        ));
+        let mvp_set = prepare::get_mvp_descriptor_set(
+            self.vapi.device.clone(),
+            pipeline.clone(),
+            mvp_buffer.clone(),
+        );
         self.command_buffers = prepare::get_command_buffers(
             &self.command_buffer_allocator,
             &self.vapi.queue,
             &pipeline,
             &self.framebuffers,
             &self.vertex_buffer,
+            vec![mvp_set],
         );
     }
 }
