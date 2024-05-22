@@ -1,4 +1,3 @@
-mod prepare;
 mod renderer;
 mod renderer_core;
 mod vulkan_api_connection;
